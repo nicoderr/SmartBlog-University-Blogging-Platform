@@ -1,7 +1,15 @@
 const { Client } = require('@elastic/elasticsearch');
+const dotenv = require('dotenv');
 
-// ✅ Correct connection to Elasticsearch
-const client = new Client({ node: 'http://localhost:9200', requestTimeout: 60000,  });
+dotenv.config();
+
+// ✅ Use environment variable for flexibility (localhost for dev, docker service for prod)
+const elasticsearchUrl = process.env.ELASTICSEARCH_URL || 'http://localhost:9200';
+
+const client = new Client({ 
+  node: elasticsearchUrl, 
+  requestTimeout: 60000,
+});
 
 // ✅ Function to index a post in Elasticsearch
 const addPostToIndex = async (req, res) => {

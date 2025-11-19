@@ -1,0 +1,229 @@
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const supabase = require('../config/supabaseClient');
+
+// Register new user
+const registerUser = async (req, res) => {
+  try {
+    const { email, password, role } = req.body;
+
+    // Validate input
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ error: 'Invalid email format' });
+    }
+
+    // Validate password length
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+    }
+
+    // Hash password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    // Insert user into database
+    const { data, error } = await supabase
+      .from('users')
+      .insert([
+        {
+          email,
+          password_hash: hashedPassword,
+          role: role || 'User',
+        },
+      ])
+      .select();
+
+    if (error) {
+      if (error.message.includes('duplicate')) {
+        return res.status(400).json({ error: 'Email already registered' });
+      }
+      return res.status(400).json({ error: error.message });
+    }
+
+    const user = data[0];
+
+    // Create JWT token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // Store session in database
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+    await supabase.from('sessions').insert([
+      {
+        user_id: user.id,
+        token,
+        expires_at: expiresAt.toISOString(),
+      },
+    ]);
+
+    res.status(201).json({
+      message: 'User registered successfully',
+      user: { id: user.id, email: user.email, role: user.role },
+      token,
+    });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Registration failed' });
+  }
+};
+
+// Login user
+const loginUser = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    // Find user by email
+    const { data: users, error: findError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('email', email);
+
+    if (findError || users.length === 0) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const user = users[0];
+
+    // Verify password
+    const passwordMatch = await bcrypt.compare(password, user.password_hash);
+    if (!passwordMatch) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Create JWT token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // Store session in database
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+    await supabase.from('sessions').insert([
+      {
+        user_id: user.id,
+        token,
+        expires_at: expiresAt.toISOString(),
+      },
+    ]);
+
+    res.status(200).json({
+      message: 'Login successful',
+      user: { id: user.id, email: user.email, role: user.role },
+      token,
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Login failed' });
+  }
+};
+
+// Validate token
+const validateToken = async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    // Check if session exists in database and is not expired
+    const { data: sessions, error } = await supabase
+      .from('sessions')
+      .select('user_id, expires_at')
+      .eq('token', token)
+      .gt('expires_at', new Date().toISOString())
+      .single();
+
+    if (error || !sessions) {
+      return res.status(401).json({ valid: false, error: 'Invalid or expired token' });
+    }
+
+    // Verify JWT
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      res.status(200).json({
+        valid: true,
+        user: { userId: decoded.userId, email: decoded.email, role: decoded.role },
+      });
+    } catch (jwtError) {
+      res.status(401).json({ valid: false, error: 'Invalid token signature' });
+    }
+  } catch (error) {
+    console.error('Token validation error:', error);
+    res.status(500).json({ valid: false, error: 'Token validation failed' });
+  }
+};
+
+// Logout user
+const logoutUser = async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+
+    if (!token) {
+      return res.status(400).json({ error: 'No token provided' });
+    }
+
+    // Delete session from database
+    const { error } = await supabase.from('sessions').delete().eq('token', token);
+
+    if (error) {
+      console.error('Logout error:', error);
+      return res.status(400).json({ error: 'Logout failed' });
+    }
+
+    res.status(200).json({ message: 'Logged out successfully' });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({ error: 'Logout failed' });
+  }
+};
+
+// Get current user info
+const getCurrentUser = async (req, res) => {
+  try {
+    // req.user is set by authenticateToken middleware
+    const user = req.user;
+
+    if (!user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    // Fetch full user data from database
+    const { data: userData, error } = await supabase
+      .from('users')
+      .select('id, email, role, created_at')
+      .eq('id', user.userId)
+      .single();
+
+    if (error || !userData) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.status(200).json({ user: userData });
+  } catch (error) {
+    console.error('Get current user error:', error);
+    res.status(500).json({ error: 'Failed to fetch user info' });
+  }
+};
+
+module.exports = {
+  registerUser,
+  loginUser,
+  validateToken,
+  logoutUser,
+  getCurrentUser,
+};
